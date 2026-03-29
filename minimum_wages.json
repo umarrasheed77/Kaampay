@@ -1,0 +1,32 @@
+{
+  "Delhi": {
+    "unskilled": 746,
+    "semi_skilled": 824,
+    "skilled": 905,
+    "effective_date": "2025-10-01"
+  },
+  "Maharashtra": {
+    "unskilled": 612,
+    "semi_skilled": 680,
+    "skilled": 748,
+    "effective_date": "2025-07-01"
+  },
+  "Uttar Pradesh": {
+    "unskilled": 537,
+    "semi_skilled": 589,
+    "skilled": 641,
+    "effective_date": "2025-04-01"
+  },
+  "Karnataka": {
+    "unskilled": 672,
+    "semi_skilled": 740,
+    "skilled": 812,
+    "effective_date": "2025-09-01"
+  },
+  "Tamil Nadu": {
+    "unskilled": 558,
+    "semi_skilled": 614,
+    "skilled": 672,
+    "effective_date": "2025-06-01"
+  }
+}

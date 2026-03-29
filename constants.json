@@ -1,0 +1,39 @@
+{
+  "demo_contractor": {
+    "name": "Suresh Sharma",
+    "business": "Sharma Construction",
+    "location": "Delhi",
+    "paytm_id": "MOCK_CONTRACTOR_001",
+    "state": "Delhi"
+  },
+  "demo_workers": [
+    {
+      "id": "W001",
+      "name": "Ramesh Kumar",
+      "aadhaar_last4": "4521",
+      "paytm_wallet": "MOCK_W001",
+      "phone_type": "feature_phone",
+      "days_in_system": 47
+    },
+    {
+      "id": "W002",
+      "name": "Suresh Yadav",
+      "aadhaar_last4": "7832",
+      "paytm_wallet": "MOCK_W002",
+      "phone_type": "no_phone",
+      "days_in_system": 23
+    },
+    {
+      "id": "W003",
+      "name": "Mohan Lal",
+      "aadhaar_last4": "3319",
+      "paytm_wallet": "MOCK_W003",
+      "phone_type": "smartphone",
+      "days_in_system": 61
+    }
+  ],
+  "demo_audio_transcript": "Ramesh aur Suresh ne aaj kaam kiya, 8 ghante, 700 rupay rate. Aur Mohan ne aadha din kiya.",
+  "demo_date": "2026-03-29",
+  "delhi_minimum_wage_unskilled": 746,
+  "demo_job_type": "construction"
+}
