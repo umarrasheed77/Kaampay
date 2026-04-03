@@ -1,0 +1,109 @@
+
+============================================================
+  TEST 1 — Basic multi-worker extraction
+============================================================
+  [PASS] Parser returns dict
+  [PASS] Has 3 entries
+  [PASS] Ramesh: 1.0 day, ₹700, gross ₹700
+  [PASS] Suresh: 1.0 day, ₹700, gross ₹700
+  [PASS] Mohan: 0.5 day, ₹700, gross ₹350
+  [PASS] Preprocessor detects >= 2 workers
+
+============================================================
+  TEST 2 — Different rates per worker
+============================================================
+  [PASS] Has 2 entries
+  [PASS] Rates are different
+  [PASS] Ramesh rate is 800
+  [PASS] Suresh rate is 750
+
+============================================================
+  TEST 3 — Three workers, one rate, one different
+============================================================
+  [PASS] Has 3 entries
+  [PASS] Bhim's rate is 950 not 700
+  [PASS] Raju's rate is 700
+  [PASS] Sonu's rate is 700
+
+============================================================
+  TEST 4 — Hindi number words preprocessing
+============================================================
+  [PASS] 'saat sau pachaas' → '750'
+  [PASS] 'saat sau' → '700'
+  [PASS] 'aath sau' → '800'
+  [PASS] 'ek hazaar' → '1000'
+  [PASS] 'paanch sau' → '500'
+  [PASS] 'chhe sau pachaas' → '650'
+  [PASS] 'aadha din' normalizes
+  [PASS] 'poora din' normalizes
+  [PASS] '700 rupay' → '700 rate'
+
+============================================================
+  TEST 5 — Single worker (must not break)
+============================================================
+  [PASS] Has 1 entry
+  [PASS] Worker is Ramesh
+  [PASS] Gross pay is 700
+  [PASS] Flat object → normalized to array
+
+============================================================
+  TEST 6 — Malformed LLM output (parser strategies)
+============================================================
+  [PASS] Strategy 2: strips markdown fences
+  [PASS] Strategy 3: extracts JSON from preamble text
+  [PASS] Strategy 4: wraps bare array
+  [PASS] Garbage input → returns None
+  [PASS] Empty string → returns None
+  [PASS] None input → returns None
+  [PASS] Entries as dict → normalized to list
+
+============================================================
+  TEST 7 — validate_and_normalize edge cases
+============================================================
+  [PASS] Missing gross_pay → recalculated
+  [PASS] Missing days_worked → defaults to 1.0
+  [PASS] Missing rate → defaults to 700
+  [PASS] Rate cascade: B inherits A's rate (900)
+  [PASS] Empty entries → returns None
+  [PASS] Empty name worker skipped, valid kept
+
+============================================================
+  TEST 8 — Entry count validation
+============================================================
+  [PASS] validate_entry_count with payroll_entries key
+  [PASS] validate_entry_count with entries key
+  [PASS] Entry count mismatch detected
+
+============================================================
+  TEST 9 — Worker connector detection
+============================================================
+  [PASS] 'A aur B' → 2 workers
+  [PASS] 'A aur B aur C' → 3 workers
+  [PASS] 'A, B, C' (comma-separated) → ≥2 workers
+  [PASS] Single worker → 1
+
+============================================================
+  TEST 10 — safeEntries logic equivalence test
+============================================================
+  [PASS] safeEntries(None) → []
+  [PASS] safeEntries({}) → []
+  [PASS] safeEntries([]) → []
+  [PASS] safeEntries({payroll_entries:[]}) → []
+  [PASS] safeEntries with payroll_entries → 1 entry
+  [PASS] safeEntries(single object) → [single]
+  [PASS] safeEntries({entries: [...]}) → 2 entries
+
+============================================================
+  RESULTS: 54/54 passed, 0 failed
+============================================================
+
+  [SUCCESS] ALL TESTS PASSED - safe to deploy!
+C:\Users\HP\Documents\KaamPay\backend\agents\vani\extractor.py:12: FutureWarning: 
+
+All support for the `google.generativeai` package has ended. It will no longer be receiving 
+updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+See README for more details:
+
+https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+
+  import google.generativeai as genai
