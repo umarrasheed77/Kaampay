@@ -66,12 +66,6 @@ npm install
 npm run dev
 ```
 
-Navigate to **http://localhost:5173**. Click **"Play Demo"** to watch the automated 5-screen flow.
-
----
-
 ## 🛡️ Built for Resilience
 We know hackathon Wi-Fi is terrible. KaamPay's frontend features an invisible interceptor (`api.js`). If any API call to the backend fails or times out, it instantly serves pre-computed perfect responses. The "continuity over correctness" philosophy ensures judges always see the emotional peak of the demo.
 
----
-*Built with ❤️ for India's invisible workforce.*
