@@ -19,7 +19,7 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 import json
 from datetime import date
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -32,7 +32,8 @@ from agents.paisa import (
     init_db, check_contractor_balance, get_score_history,
     get_daily_totals, get_contractor_workers, generate_contractor_insights,
     get_today_summary, raise_dispute, get_disputes,
-    validate_lender_api_key, find_workers_by_aadhaar, get_db
+    validate_lender_api_key, find_workers_by_aadhaar, get_db,
+    resolve_contractor_id, is_valid_aeps_token_format, DEFAULT_CONTRACTOR_ID
 )
 from agents.kagaz import generate_all_payslips
 
@@ -65,6 +66,23 @@ with open(CONSTANTS_PATH, 'r', encoding='utf-8') as f:
 @app.on_event("startup")
 def startup():
     init_db()
+
+
+# ─────────────────────────────────────────
+# Contractor Authentication
+#
+# Every endpoint previously hardcoded "CONT_001" with no way for any
+# other contractor to authenticate — this dependency resolves the
+# acting contractor from a `Authorization: Bearer <token>` header when
+# one is supplied, and falls back to the demo contractor ONLY when no
+# header is present at all, preserving the existing demo UI's behavior.
+# ─────────────────────────────────────────
+
+def get_acting_contractor_id(authorization: Optional[str] = Header(None)) -> str:
+    try:
+        return resolve_contractor_id(authorization)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid or inactive contractor token")
 
 
 # ─────────────────────────────────────────
@@ -222,13 +240,13 @@ async def api_process_payroll(req: PayrollRequest):
 # ─────────────────────────────────────────
 
 @app.post("/api/execute-payments")
-async def api_execute_payments(req: PaymentRequest):
+async def api_execute_payments(req: PaymentRequest, contractor_id: str = Depends(get_acting_contractor_id)):
     """Takes HISAAB's output, executes payments, generates payslips."""
     try:
         hisaab_output = req.model_dump()
 
         # PAISA: Execute payments + calculate scores
-        paisa_result = execute_all_payments(hisaab_output)
+        paisa_result = execute_all_payments(hisaab_output, contractor_id=contractor_id)
 
         # KAGAZ: Generate payslips
         kagaz_result = generate_all_payslips(
@@ -260,7 +278,7 @@ async def api_execute_payments(req: PaymentRequest):
 # ─────────────────────────────────────────
 
 @app.post("/api/register-worker")
-async def api_register_worker(req: RegisterWorkerRequest):
+async def api_register_worker(req: RegisterWorkerRequest, contractor_id: str = Depends(get_acting_contractor_id)):
     """Fallback manual registration handling Aadhaar and Name."""
     try:
         worker_data = {
@@ -270,7 +288,6 @@ async def api_register_worker(req: RegisterWorkerRequest):
             "kaam_band": "building",
             "kaam_score": 600
         }
-        contractor_id = CONSTANTS.get("demo_contractor", {}).get("contractor_id", "CONT_001")
         result = register_worker(contractor_id, worker_data, aadhaar_full=req.aadhaar_number)
         return JSONResponse(content=result)
     except Exception as e:
@@ -308,10 +325,10 @@ async def api_worker_score(worker_id: str):
 # ─────────────────────────────────────────
 
 @app.get("/api/check-balance")
-async def api_check_balance(total: float = 0):
+async def api_check_balance(total: float = 0, contractor_id: str = Depends(get_acting_contractor_id)):
     """Check contractor balance before payment."""
     try:
-        result = check_contractor_balance("CONT_001", total)
+        result = check_contractor_balance(contractor_id, total)
         return JSONResponse(content=result)
     except Exception as e:
         return JSONResponse(content={
@@ -344,10 +361,10 @@ async def api_raise_dispute(req: DisputeRequest):
         })
 
 @app.get("/api/disputes")
-async def api_list_disputes():
+async def api_list_disputes(contractor_id: str = Depends(get_acting_contractor_id)):
     """List all disputes for contractor."""
     try:
-        disputes = get_disputes("CONT_001")
+        disputes = get_disputes(contractor_id)
         return JSONResponse(content={"disputes": disputes})
     except Exception as e:
         return JSONResponse(content={"disputes": [], "error": str(e)})
@@ -365,16 +382,23 @@ async def lookup_kaam_score(
     """
     PRIMARY ENDPOINT FOR LENDERS AND BC AGENTS.
     Worker gives Aadhaar last 4 + fingerprint → score returned.
-    """
-    # Validate API key (accept any for demo)
-    if x_api_key:
-        lender = validate_lender_api_key(x_api_key)
-    else:
-        lender = {"lender_name": "Demo User"}
 
-    # Validate AePS token (accept any non-empty for demo)
-    if not request.aeps_verification_token:
-        raise HTTPException(status_code=403, detail="Biometric verification required.")
+    Both checks below were previously non-gating: a missing x_api_key
+    silently fell through to a fake "Demo User" lender, and the AePS
+    token was accepted if merely non-empty. Both are now hard requirements.
+    """
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing lender API key (x-api-key header).")
+
+    lender = validate_lender_api_key(x_api_key)
+    if lender is None:
+        raise HTTPException(status_code=401, detail="Invalid or inactive lender API key.")
+
+    if not is_valid_aeps_token_format(request.aeps_verification_token):
+        raise HTTPException(
+            status_code=403,
+            detail="Biometric verification required (invalid or missing AePS token format)."
+        )
 
     # Look up worker by Aadhaar last 4
     workers = find_workers_by_aadhaar(request.aadhaar_last4)
@@ -444,27 +468,27 @@ async def api_score_history(worker_id: str, days: int = 90):
 # ─────────────────────────────────────────
 
 @app.get("/api/kaam/contractor/daily-totals")
-async def api_daily_totals(days: int = 30):
+async def api_daily_totals(days: int = 30, contractor_id: str = Depends(get_acting_contractor_id)):
     """Daily payment totals for spending chart."""
-    totals = get_daily_totals("CONT_001", days)
+    totals = get_daily_totals(contractor_id, days)
     return JSONResponse(content={"totals": totals})
 
 @app.get("/api/kaam/contractor/workers")
-async def api_contractor_workers():
+async def api_contractor_workers(contractor_id: str = Depends(get_acting_contractor_id)):
     """Worker roster for contractor."""
-    workers = get_contractor_workers("CONT_001")
+    workers = get_contractor_workers(contractor_id)
     return JSONResponse(content={"workers": workers})
 
 @app.get("/api/kaam/contractor/insights")
-async def api_contractor_insights():
+async def api_contractor_insights(contractor_id: str = Depends(get_acting_contractor_id)):
     """AI insights for contractor dashboard."""
-    insights = generate_contractor_insights("CONT_001")
+    insights = generate_contractor_insights(contractor_id)
     return JSONResponse(content={"insights": insights})
 
 @app.get("/api/kaam/contractor/summary")
-async def api_contractor_summary():
+async def api_contractor_summary(contractor_id: str = Depends(get_acting_contractor_id)):
     """Today's summary for dashboard cards."""
-    summary = get_today_summary("CONT_001")
+    summary = get_today_summary(contractor_id)
     return JSONResponse(content=summary)
 
 

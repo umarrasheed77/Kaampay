@@ -27,43 +27,116 @@ MODELS_TO_TRY = [
 
 def regex_fallback_extract(transcript: str) -> dict:
     """
-    Very basic regex fallback for when LLM is down.
-    Looks for names and numbers in the transcript.
+    Regex/heuristic fallback for when the LLM is unavailable (quota
+    exceeded, network error, etc).
+
+    PREVIOUS BUG: this function split the transcript on a bare period
+    character (via `re.split(r'aur|and|,|[.]', ...)`). preprocess_transcript
+    normalizes hour/day phrases into decimal-day tokens like "1.0 din"
+    and "0.5 din" — splitting on "." breaks "1.0" into "1" and "0",
+    leaving "din" (Hindi for "day") orphaned in its own segment, where
+    it then got misidentified as a worker's name (it isn't in the stop
+    words list). For the standard demo transcript this produced ZERO
+    correct entries: two fake "Din" workers and a dropped Ramesh/Suresh,
+    because shared trailing clauses ("Ramesh aur Suresh ne ... 700
+    rupay") were also never associated back to the names they applied to
+    — each comma-delimited segment was treated in total isolation.
+
+    FIX: search for KNOWN worker names directly in the transcript
+    (rather than guessing from arbitrary leftover words), then for each
+    name found, look FORWARD in the full text for the nearest days/rate
+    mention, carrying the most recent value forward when a specific
+    worker's clause doesn't repeat it — exactly matching the "last
+    mentioned rate applies to subsequent workers" rule the LLM prompt
+    itself documents. This also naturally handles a shared trailing
+    clause covering multiple preceding names, since each name's forward
+    search independently finds the same shared days/rate tokens.
     """
     import re
-    
-    # Try to find common patterns like "Ramesh 700" or "Suresh 800"
-    # This is a naive implementation for demo reliability
+    from .verification import get_all_known_workers
+
+    text = transcript.lower()
+    known_workers = get_all_known_workers()
+    known_names = [w["name"] for w in known_workers if w.get("name")]
+
+    # 1. Locate every known worker's first-name occurrence in the text.
+    name_positions = []
+    for name in known_names:
+        first_token = name.split()[0].lower()
+        for m in re.finditer(r'\b' + re.escape(first_token) + r'\b', text):
+            name_positions.append((m.start(), name))
+
+    # Fallback: no known name matched at all (e.g. a brand-new,
+    # unregistered worker) — fall back to a generic word heuristic so an
+    # "unverified" entry can still surface for the contractor to correct,
+    # rather than silently returning nothing.
+    if not name_positions:
+        stop_words = {
+            'ko', 'ne', 'aaj', 'kaam', 'kiya', 'rate', 'do', 'mein', 'diya',
+            'the', 'is', 'to', 'for', 'din', 'hours', 'aur', 'and'
+        }
+        for m in re.finditer(r'[a-z]+', text):
+            word = m.group()
+            if word not in stop_words and len(word) > 2:
+                name_positions.append((m.start(), word.capitalize()))
+
+    # De-duplicate same name matched at multiple positions, keep first occurrence
+    seen = set()
+    deduped = []
+    for pos, name in sorted(name_positions):
+        if name.lower() not in seen:
+            seen.add(name.lower())
+            deduped.append((pos, name))
+    name_positions = deduped
+
+    if not name_positions:
+        return None
+
+    # 2. Locate every days-worked mention (decimal-day tokens the
+    # preprocessor already normalized things into, e.g. "1.0 din").
+    days_tokens = [
+        (m.start(), float(m.group(1)))
+        for m in re.finditer(r'(\d+(?:\.\d+)?)\s*din\b', text)
+    ]
+    days_tokens.sort()
+
+    # 3. Locate every rate mention (preprocessor normalizes "700 rupay" -> "700 rate").
+    rate_tokens = [
+        (m.start(), int(float(m.group(1))))
+        for m in re.finditer(r'(\d+(?:\.\d+)?)\s*rate\b', text)
+    ]
+    rate_tokens.sort()
+
+    # 4. For each name, take the first days/rate token AT OR AFTER its
+    #    position; fall back to carrying the most recent value forward.
     entries = []
-    
-    # Split by common connectors
-    parts = re.split(r'aur|and|,|\.', transcript.lower())
-    
-    for part in parts:
-        # Extract name (first word-ish) and amount (the number)
-        # Assuming format like "Ramesh ko 700" or "Suresh 800 rupay"
-        numbers = re.findall(r'\d+', part)
-        if not numbers: continue
-        
-        amount = int(numbers[0])
-        # Find potential name: words before the number, excluding common Hindi/Eng stop words
-        words = re.findall(r'[a-z]+', part)
-        stop_words = {'ko', 'ne', 'aaj', 'kaam', 'kiya', 'rupay', 'rate', 'do', 'mein', 'diya', 'the', 'is', 'to', 'for'}
-        name_words = [w for w in words if w not in stop_words]
-        
-        if name_words:
-            worker_name = name_words[0].capitalize()
-            entries.append({
-                "worker_name": worker_name,
-                "days_worked": 1.0,
-                "rate_per_day": amount,
-                "gross_pay": float(amount)
-            })
-            
+    last_rate = 700
+    last_days = 1.0
+    for pos, name in name_positions:
+        days_val = next((v for p, v in days_tokens if p >= pos), None)
+        rate_val = next((v for p, v in rate_tokens if p >= pos), None)
+
+        if days_val is None:
+            days_val = last_days
+        else:
+            last_days = days_val
+
+        if rate_val is None:
+            rate_val = last_rate
+        else:
+            last_rate = rate_val
+
+        entries.append({
+            "worker_name": name,
+            "days_worked": round(days_val, 2),
+            "rate_per_day": rate_val,
+            "gross_pay": round(days_val * rate_val, 2)
+        })
+
     if entries:
         return {
             "entries": entries,
-            "confidence": 0.5,
+            "confidence": 0.6,
             "language_detected": "mixed",
             "parsing_notes": "Extracted via Regex Fallback (API Quota Exceeded)"
         }

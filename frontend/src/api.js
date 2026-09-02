@@ -215,12 +215,19 @@ export async function apiScoreLookup(aadhaarLast4, demoMode = false) {
     };
   }
 
+  // NOTE: the backend now enforces both of these for real (previously
+  // a missing/malformed value here would still silently succeed):
+  // - x-api-key must be a real, registered lender key
+  // - aeps_verification_token must match the AEPS-<12+ chars> format
   return safeFetch(`${API_BASE}/kaam/score/lookup`, {}, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': 'demo-api-key-12345'
+    },
     body: JSON.stringify({
       aadhaar_last4: aadhaarLast4,
-      aeps_verification_token: "demo-token",
+      aeps_verification_token: "AEPS-DEMOFRONTENDTOKEN01",
       query_purpose: "credit_assessment"
     })
   });

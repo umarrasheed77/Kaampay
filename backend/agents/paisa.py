@@ -12,6 +12,7 @@ v2.0 — Full overhaul:
 """
 
 import os
+import re
 import json
 import uuid
 import random
@@ -36,6 +37,12 @@ SEASONAL_LOW_MONTHS = [6, 7, 8, 9]
 MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 0.5  # Short for demo
 
+DEFAULT_CONTRACTOR_ID = "CONT_001"
+# Fixed demo token (seeded once, deterministic) so the shipped demo/docs
+# can reference it directly. A real deployment would issue per-contractor
+# tokens at signup rather than relying on any fixed value.
+DEMO_CONTRACTOR_TOKEN = os.environ.get("DEMO_CONTRACTOR_TOKEN", "demo-contractor-token-CONT001")
+
 
 class PaymentStatus(Enum):
     PENDING = "PENDING"
@@ -54,6 +61,13 @@ def get_db():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def _ensure_column(cursor, table, column, col_type):
+    """Add `column` to `table` if it doesn't already exist (safe on repeated calls)."""
+    existing = [row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in existing:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
 def init_db():
@@ -77,9 +91,12 @@ def init_db():
             total_workers INTEGER DEFAULT 0,
             total_paid_lifetime REAL DEFAULT 0,
             date_registered DATE DEFAULT CURRENT_DATE,
-            is_active INTEGER DEFAULT 1
+            is_active INTEGER DEFAULT 1,
+            contractor_token TEXT UNIQUE
         )
     """)
+    # Migration: older DBs created before this column existed
+    _ensure_column(cursor, "contractors", "contractor_token", "TEXT")
 
     # ── WORKERS TABLE
     cursor.execute("""
@@ -242,11 +259,12 @@ def seed_demo_data(cursor):
     # Demo contractor
     cursor.execute("""
         INSERT OR IGNORE INTO contractors VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         "CONT_001", "Suresh Sharma", "Sharma Construction",
         "9876500001", "Delhi", "PAYTM_CONT_001",
-        15000.0, 3, 94500.0, "2025-10-01", 1
+        15000.0, 3, 94500.0, "2025-10-01", 1,
+        DEMO_CONTRACTOR_TOKEN
     ))
 
     # Demo lender API key
@@ -412,12 +430,20 @@ def attempt_single_payment(entry):
         }
 
 
-def execute_payment_with_retry(entry, payment_id):
+def execute_payment_with_retry(entry, payment_id, conn=None):
     """
     Attempts payment up to MAX_RETRIES + 1 times.
     Never silently fails — always returns clear status.
+
+    Accepts an optional shared `conn` so a caller processing many
+    entries in one batch (see execute_all_payments) can reuse a single
+    connection instead of opening/closing a new one per worker per
+    attempt.
     """
-    conn = get_db()
+    should_close = False
+    if conn is None:
+        conn = get_db()
+        should_close = True
     attempt = 0
 
     while attempt <= MAX_RETRIES:
@@ -448,7 +474,8 @@ def execute_payment_with_retry(entry, payment_id):
                 WHERE payment_id = ?
             """, (result["upi_reference"], result["txn_id"], payment_id))
             conn.commit()
-            conn.close()
+            if should_close:
+                conn.close()
 
             # Delivery status messages
             delivery_messages = {
@@ -488,7 +515,8 @@ def execute_payment_with_retry(entry, payment_id):
         (payment_id,)
     )
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
     return {
         "payment_id": payment_id,
@@ -1139,11 +1167,73 @@ def get_disputes(contractor_id):
 
 
 # ─────────────────────────────────────────
+# Contractor Authentication
+#
+# Previously every endpoint hardcoded "CONT_001" with no way for any
+# other contractor to authenticate — the DB schema (contractors,
+# contractor_worker_relationships) was already multi-tenant-ready but
+# the API layer enforced none of it. This resolves the acting
+# contractor from a bearer token when one is supplied, and falls back
+# to the demo contractor only when no Authorization header is present
+# at all — preserving today's working demo flow while making it
+# possible (and testable) for any other registered contractor to
+# authenticate as themselves via their own token.
+# ─────────────────────────────────────────
+
+def get_contractor_by_token(token: str):
+    """Look up a contractor by their auth token. Returns None if invalid/inactive."""
+    if not token:
+        return None
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM contractors WHERE contractor_token = ? AND is_active = 1",
+        (token,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def resolve_contractor_id(authorization_header: str = None) -> str:
+    """
+    Resolves the acting contractor_id from a `Bearer <token>` Authorization
+    header. Falls back to the demo contractor ONLY when no header is
+    supplied at all (back-compat with the current single-tenant demo UI).
+    A header that IS supplied but doesn't match any active contractor
+    raises ValueError so the caller can reject the request with 401
+    rather than silently acting as the demo contractor.
+    """
+    if not authorization_header:
+        return DEFAULT_CONTRACTOR_ID
+
+    token = authorization_header
+    if authorization_header.lower().startswith("bearer "):
+        token = authorization_header[7:].strip()
+
+    contractor = get_contractor_by_token(token)
+    if contractor is None:
+        raise ValueError("Invalid or inactive contractor token")
+    return contractor["contractor_id"]
+
+
+def issue_contractor_token(contractor_id: str) -> str:
+    """Generates and persists a new random auth token for a contractor."""
+    token = f"ct_{uuid.uuid4().hex}"
+    conn = get_db()
+    conn.execute(
+        "UPDATE contractors SET contractor_token = ? WHERE contractor_id = ?",
+        (token, contractor_id)
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+# ─────────────────────────────────────────
 # Lender API Functions (FIX 12)
 # ─────────────────────────────────────────
 
 def validate_lender_api_key(api_key):
-    """Validate a lender API key."""
+    """Validate a lender API key and record usage against it."""
     if not api_key:
         return None
     conn = get_db()
@@ -1151,8 +1241,37 @@ def validate_lender_api_key(api_key):
         "SELECT * FROM lender_api_keys WHERE api_key = ? AND is_active = 1",
         (api_key,)
     ).fetchone()
+    if row:
+        conn.execute("""
+            UPDATE lender_api_keys
+            SET total_queries = total_queries + 1, last_used = CURRENT_TIMESTAMP
+            WHERE api_key = ?
+        """, (api_key,))
+        conn.commit()
     conn.close()
     return dict(row) if row else None
+
+
+# Mock AePS (Aadhaar-enabled Payment System) biometric token format.
+# This is NOT real biometric verification — a genuine integration
+# requires a licensed AePS provider and hardware fingerprint capture,
+# neither of which is available here. This at minimum rejects the
+# previous "any non-empty string" check, which accepted literally
+# anything (including "x") as proof of a completed biometric scan.
+_AEPS_TOKEN_PATTERN = re.compile(r'^AEPS-[A-Za-z0-9]{12,}$')
+
+
+def is_valid_aeps_token_format(token: str) -> bool:
+    """
+    MOCK format check only — verifies the token LOOKS like something a
+    real AePS device/SDK would have issued (a fixed prefix + a
+    sufficiently long opaque identifier). Does not verify the token was
+    ever actually issued by a biometric device; only a real AePS
+    provider integration can do that.
+    """
+    if not token:
+        return False
+    return bool(_AEPS_TOKEN_PATTERN.match(token))
 
 
 def find_workers_by_aadhaar(aadhaar_last4):
@@ -1170,10 +1289,17 @@ def find_workers_by_aadhaar(aadhaar_last4):
 # Main Payment Orchestrator
 # ─────────────────────────────────────────
 
-def save_payment_record(entry, contractor_id):
-    """Create a payment record in PENDING state."""
+def save_payment_record(entry, contractor_id, conn=None):
+    """
+    Create a payment record in PENDING state.
+    Accepts an optional shared `conn` to avoid opening a fresh
+    connection per worker in a batch payroll run.
+    """
     payment_id = str(uuid.uuid4())
-    conn = get_db()
+    should_close = False
+    if conn is None:
+        conn = get_db()
+        should_close = True
 
     payment_method = "upi"
     if entry.get("phone_type") == "no_phone":
@@ -1197,52 +1323,102 @@ def save_payment_record(entry, contractor_id):
         entry.get("minimum_wage", 746)
     ))
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
     return payment_id
 
 
-def execute_all_payments(hisaab_output):
+def execute_all_payments(hisaab_output, contractor_id=None):
     """
-    Process all payments and compute scores.
-    Uses retry logic for each payment.
+    Process all payments and compute scores. Uses retry logic for each
+    payment.
+
+    contractor_id: the AUTHENTICATED acting contractor (resolved by the
+    caller from the request's auth token — see main.py). If not
+    supplied, falls back to the contractor_id embedded in HISAAB's own
+    output. NOTE: a previous version of this function read
+    CONSTANTS["demo_contractor"]["paytm_id"] ("PAYTM_CONT_001") instead
+    of "contractor_id" ("CONT_001") — since paytm_id is not a valid
+    primary key in the contractors table, every payment failed with a
+    FOREIGN KEY constraint error.
+
+    Balance handling: the full requested total is reserved ATOMICALLY
+    up front via a single guarded UPDATE (`WHERE paytm_balance >= ?`).
+    This closes two separate problems in the old implementation: (1) a
+    TOCTOU race between a separate /api/check-balance call and this
+    deduction, and (2) the more fundamental issue that payments used to
+    be executed FIRST and the balance decremented unconditionally
+    afterward — meaning the balance could be driven negative regardless
+    of any race, since nothing ever guarded the UPDATE. Any amount that
+    ends up HELD (payment gateway simulation failure) is refunded back
+    to the balance once final payment outcomes are known.
     """
+    conn = None
     try:
         init_db()
 
+        if not contractor_id:
+            contractor_id = hisaab_output.get("contractor", {}).get(
+                "contractor_id", DEFAULT_CONTRACTOR_ID
+            )
+
+        entries = hisaab_output.get("entries", [])
+        total_requested = sum(float(e.get("net_pay", 0)) for e in entries)
+
+        conn = get_db()
+
+        if total_requested > 0:
+            cur = conn.execute("""
+                UPDATE contractors
+                SET paytm_balance = paytm_balance - ?
+                WHERE contractor_id = ? AND paytm_balance >= ?
+            """, (total_requested, contractor_id, total_requested))
+            if cur.rowcount == 0:
+                row = conn.execute(
+                    "SELECT paytm_balance FROM contractors WHERE contractor_id = ?",
+                    (contractor_id,)
+                ).fetchone()
+                available = row["paytm_balance"] if row else 0
+                conn.close()
+                return {
+                    "payment_results": [],
+                    "scores": {},
+                    "total_paid": 0,
+                    "payment_status": "insufficient_balance",
+                    "error_message": (
+                        f"Insufficient contractor balance: need ₹{total_requested:.2f}, "
+                        f"have ₹{available:.2f}."
+                    )
+                }
+            conn.commit()
+
         payment_results = []
         scores = {}
-        contractor_id = CONSTANTS.get("demo_contractor", {}).get("paytm_id", "CONT_001")
 
-        # Use contractor_id from constants mapping
-        if contractor_id == "MOCK_CONTRACTOR_001":
-            contractor_id = "CONT_001"
-
-        for entry in hisaab_output.get("entries", []):
-            # Create payment record
-            payment_id = save_payment_record(entry, contractor_id)
-
-            # Execute with retry
-            payment = execute_payment_with_retry(entry, payment_id)
+        for entry in entries:
+            payment_id = save_payment_record(entry, contractor_id, conn=conn)
+            payment = execute_payment_with_retry(entry, payment_id, conn=conn)
             payment_results.append(payment)
 
-            # Calculate score
-            score = calculate_kaam_score(entry["worker_id"])
+            score = calculate_kaam_score(entry["worker_id"], conn=conn)
             scores[entry["worker_id"]] = score
 
         total_paid = sum(p["amount"] for p in payment_results if p["status"] == "SUCCESS")
+        held_amount = sum(p["amount"] for p in payment_results if p["status"] != "SUCCESS")
         all_success = all(p["status"] == "SUCCESS" for p in payment_results)
 
-        # Deduct from contractor balance
+        if held_amount > 0:
+            conn.execute(
+                "UPDATE contractors SET paytm_balance = paytm_balance + ? WHERE contractor_id = ?",
+                (held_amount, contractor_id)
+            )
         if total_paid > 0:
-            conn = get_db()
-            conn.execute("""
-                UPDATE contractors SET
-                    paytm_balance = paytm_balance - ?,
-                    total_paid_lifetime = total_paid_lifetime + ?
-                WHERE contractor_id = ?
-            """, (total_paid, total_paid, contractor_id))
-            conn.commit()
-            conn.close()
+            conn.execute(
+                "UPDATE contractors SET total_paid_lifetime = total_paid_lifetime + ? WHERE contractor_id = ?",
+                (total_paid, contractor_id)
+            )
+        conn.commit()
+        conn.close()
 
         return {
             "payment_results": payment_results,
@@ -1252,6 +1428,11 @@ def execute_all_payments(hisaab_output):
         }
 
     except Exception as e:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         return {
             "payment_results": [],
             "scores": {},

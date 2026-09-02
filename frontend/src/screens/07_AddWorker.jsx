@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import Toast from '../components/Toast';
 import { useGlobalState } from '../context/GlobalState';
+import { useDemoMode } from '../hooks/useDemoMode.jsx';
+import { apiRegisterWorker } from '../api';
 
 export default function AddWorkerScreen({ onNavigate }) {
   const { addWorker } = useGlobalState();
+  const { demoMode } = useDemoMode();
   const [step, setStep] = useState(1);
   const [toast, setToast] = useState('');
   const [name, setName] = useState('');
@@ -52,21 +55,15 @@ export default function AddWorkerScreen({ onNavigate }) {
     setToast('Registering worker on FastAPI Server...');
 
     try {
-      const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const resp = await fetch(`${API_URL}/api/register-worker`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name,
-          phone_number: cleanPhone,
-          aadhaar_number: cleanAadhaar,
-          job_category: "unskilled"
-        })
-      });
+      setToast('Registering worker on FastAPI Server...');
+      const dbRecord = await apiRegisterWorker({
+        name: name,
+        phone_number: cleanPhone,
+        aadhaar_number: cleanAadhaar,
+        job_category: "unskilled"
+      }, demoMode);
 
-      const dbRecord = await resp.json();
-
-      if (!resp.ok || dbRecord.success === false) {
+      if (dbRecord.success === false) {
         console.warn("Backend registration failed:", dbRecord);
         setToast(dbRecord.error || 'Registration failed. Please try again.');
         setLoading(false);

@@ -88,10 +88,9 @@ export default function WalletSuccessScreen({ onNavigate, topUpAmount }) {
             }}>
               <div style={{ fontSize: 12, color: '#9ca3af' }}>{row.label}</div>
               <div style={{
-                fontSize: 13, fontWeight: 600,
+                fontSize: row.mono ? 11 : 13, fontWeight: 600,
                 color: row.highlight ? '#0ea56c' : '#111827',
-                fontFamily: row.mono ? 'monospace' : 'inherit',
-                fontSize: row.mono ? 11 : 13
+                fontFamily: row.mono ? 'monospace' : 'inherit'
               }}>{row.value}</div>
             </div>
           ))}

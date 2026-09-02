@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import { useVoiceRecognition } from '../hooks/useVoiceRecognition';
 import { useGlobalState } from '../context/GlobalState';
+import { useDemoMode } from '../hooks/useDemoMode.jsx';
+import { apiTranscribe } from '../api';
 
 export default function VoiceInputScreen({ onNavigate }) {
   const { state: globalState, addWorker, stagePayroll, searchWorker } = useGlobalState();
+  const { demoMode } = useDemoMode();
   const { isListening, transcript, error, startListening, stopListening, isSupported } = useVoiceRecognition();
   
   const [feedback, setFeedback] = useState(null);
@@ -46,13 +49,7 @@ export default function VoiceInputScreen({ onNavigate }) {
     if (intent.action === 'API_DISPATCH' && intent.text) {
       setLoadingBackend(true);
       try {
-        const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-        const resp = await fetch(`${API_URL}/api/transcribe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: intent.text })
-        });
-        const result = await resp.json();
+        const result = await apiTranscribe(intent.text, demoMode);
 
         // Worker not found — show which names failed
         if (result.status === 'error' && result.error_message === "Worker not found.") {

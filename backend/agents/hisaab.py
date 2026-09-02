@@ -64,10 +64,16 @@ def match_worker(name: str, known_workers: list) -> dict:
 
 
 def validate_wage(rate_per_day: float, state: str, job_category: str = "unskilled") -> dict:
-    """Check if wage meets minimum wage for the state."""
-    # Try new constants format first
-    min_wages = CONSTANTS.get("minimum_wages", {})
-    state_wages = min_wages.get(state) or MINIMUM_WAGES.get(state)
+    """
+    Check if wage meets minimum wage for the state.
+
+    Previously checked constants.json's own minimum_wages table first,
+    falling back to minimum_wages.json only if absent — both files
+    independently defined the same states with duplicated values,
+    risking silent drift if only one was updated during a wage revision.
+    minimum_wages.json is now the single source of truth.
+    """
+    state_wages = MINIMUM_WAGES.get(state)
 
     if not state_wages:
         return {"compliant": True, "minimum_required": 0, "shortfall": 0, "warning_hindi": None}
@@ -108,10 +114,16 @@ def call_paytm_ekyc_api(aadhaar: str, name: str) -> dict:
     """
     Mock Paytm eKYC API call.
     In production: POST to Paytm eKYC API.
+
+    The persisted account ID must never be derived from Aadhaar digits —
+    a previous version embedded the last-4 Aadhaar digits directly into
+    this string, which then got stored verbatim, leaking a PII fragment
+    into a field that isn't otherwise treated as sensitive. Uses an
+    opaque random identifier instead.
     """
     return {
         "success": True,
-        "paytm_account_id": f"PPB_{aadhaar[-4:]}_{name[:3].upper()}",
+        "paytm_account_id": f"PPB_{uuid.uuid4().hex[:10].upper()}",
         "account_type": "paytm_payments_bank",
         "kyc_level": "full",
         "monthly_limit": 100000

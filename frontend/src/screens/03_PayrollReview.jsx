@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useGlobalState } from '../context/GlobalState';
+import { useDemoMode } from '../hooks/useDemoMode.jsx';
+import { apiExecutePayments } from '../api';
 import { safeEntries } from '../utils/safeEntries';
 import EmptyState from '../components/EmptyState';
 
 export default function PayrollReviewScreen({ onNavigate }) {
   const { state, addPayroll, clearPendingPayroll, setRecentBatch } = useGlobalState();
+  const { demoMode } = useDemoMode();
   const [loading, setLoading] = useState(false);
   
   const entries = safeEntries(state.pending_payroll);
@@ -26,38 +29,33 @@ export default function PayrollReviewScreen({ onNavigate }) {
     setLoading(true);
 
     try {
-      // Structure payload precisely for FastAPI backend Model (PaymentRequest)
-        const payload = {
-          status: "success",
-          payroll_date: new Date().toISOString().split('T')[0],
-          contractor: { id: "CONT_001", name: state.contractor?.name || "Demo Contractor" },
-          entries: entries.map(item => ({
-            worker_id: item.worker_id,
-            worker_name: item.worker_name,
-            net_pay: item.amount || item.net_pay || item.gross_pay || 0,
-            days_worked: item.days_worked === 'Custom' ? 1 : item.days_worked,
-            rate_per_day: item.rate_per_day || 700
-          })),
-          total_payout: totalAmount,
-          worker_count: entries.length
-        };
+      // Structure payload precisely for FastAPI backend Model (PaymentRequest).
+      // NOTE: gross_pay is REQUIRED by the backend's save_payment_record
+      // (accessed as entry["gross_pay"] with no default) — this payload
+      // previously omitted it, meaning every live (non-demo-mode)
+      // submission would silently fail server-side with a KeyError,
+      // invisible here because the UI always proceeds locally regardless
+      // of the response (see below).
+      const payload = {
+        status: "success",
+        payroll_date: new Date().toISOString().split('T')[0],
+        contractor: { contractor_id: "CONT_001", name: state.contractor?.name || "Demo Contractor" },
+        entries: entries.map(item => ({
+          worker_id: item.worker_id,
+          worker_name: item.worker_name,
+          net_pay: item.amount || item.net_pay || item.gross_pay || 0,
+          gross_pay: item.amount || item.gross_pay || item.net_pay || 0,
+          days_worked: item.days_worked === 'Custom' ? 1 : item.days_worked,
+          rate_per_day: item.rate_per_day || 700
+        })),
+        total_payout: totalAmount,
+        worker_count: entries.length
+      };
 
-      const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const resp = await fetch(`${API_URL}/api/execute-payments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const dbRecord = await resp.json();
-      
-      if (!resp.ok) {
-        console.warn("Backend Paisa engine rejected execution:", dbRecord);
-      } else {
-        console.log("Success! Backend PAISA Engine & KAGAZ PDF generated:", dbRecord);
-      }
+      const dbRecord = await apiExecutePayments(payload, demoMode);
+      console.log("PAISA/KAGAZ result:", dbRecord);
     } catch (e) {
-       console.warn("Backend is offline. Processing strictly via local state context.", e);
+       console.warn("Payment submission failed; proceeding via local state for a resilient demo UX.", e);
     }
 
     // Always succeed locally for seamless resilient demo UX
